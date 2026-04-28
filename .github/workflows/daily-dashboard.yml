@@ -8,7 +8,7 @@ on:
 
 jobs:
   send-dashboard:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 10
     env:
       SMTP_HOST: ${{ secrets.SMTP_HOST }}
