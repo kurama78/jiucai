@@ -459,8 +459,8 @@ def sentiment_name(value: str) -> str:
 
 
 def send_email(subject: str, body_html: str, recipients: list[str]) -> None:
-    host = os.getenv("SMTP_HOST", "smtp.qq.com")
-    port = int(os.getenv("SMTP_PORT", "465"))
+    host = os.getenv("SMTP_HOST") or "smtp.qq.com"
+    port = int(os.getenv("SMTP_PORT") or "465")
     sender = os.getenv("SMTP_USER", "")
     password = os.getenv("SMTP_PASSWORD", "")
     if not sender or not password:
