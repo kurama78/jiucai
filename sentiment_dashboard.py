@@ -37,12 +37,23 @@ UA = (
 
 PANIC_WORDS = {
     "不玩了", "没救了", "割肉", "崩了", "破发", "亏麻", "暴跌", "清仓", "退市",
-    "跌停", "套牢", "跑路", "认输", "凉了", "砸盘", "爆雷", "绝望",
+    "跌停", "套牢", "被套", "跑路", "认输", "凉了", "砸盘", "爆雷", "绝望",
+    "失望", "亏麻了", "扛不住", "跌麻了", "关灯吃面", "腰斩", "踩雷",
 }
-CALM_WORDS = {"等反弹", "观望", "震荡", "横盘", "等等", "不动", "持有", "企稳", "修复"}
+CALM_WORDS = {"等反弹", "观望", "震荡", "横盘", "等等", "不动", "不敢动", "持有", "企稳", "修复", "装死", "躺平"}
 EUPHORIA_WORDS = {
     "涨停", "起飞", "牛市", "翻倍", "加仓", "满仓", "突破", "主升", "新高",
-    "龙头", "连板", "大涨", "发财", "冲鸭", "梭哈",
+    "龙头", "连板", "大涨", "发财", "冲鸭", "梭哈", "抄底", "黄金坑", "满仓干",
+}
+SENTIMENT_TERMS = tuple(sorted(PANIC_WORDS | CALM_WORDS | EUPHORIA_WORDS, key=len, reverse=True))
+PRIORITY_TERMS = {
+    "不玩了", "没救了", "满仓干", "割肉", "抄底", "黄金坑", "观望", "等反弹", "不敢动", "被套",
+}
+STOP_WORDS = {
+    "扫一扫下载app", "扫一扫下载", "下载app", "意见建议", "基金交易", "模拟炒股", "客户端下载",
+    "手机东方财富", "东方财富", "同花顺", "股吧", "财经", "登录", "注册", "热门", "财富号",
+    "资讯", "帖子", "点击", "全部", "网页", "手机", "客户端", "数据", "广告", "首页",
+    "创作平台", "维权", "我的", "搜索", "电脑版", "风险提示", "免责声明", "行情图",
 }
 
 
@@ -124,60 +135,102 @@ def text_sentiment(text: str) -> str:
     return max(scores, key=scores.get) if max(scores.values()) else random.choice(["despair", "calm", "euphoria"])
 
 
-def collect_eastmoney_guba() -> tuple[list[Mention], list[str]]:
-    """Best-effort collector for Eastmoney Guba hot topics.
+def visible_text(body: str) -> str:
+    clean = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", body, flags=re.I)
+    clean = re.sub(r"<[^>]+>", " ", clean)
+    clean = html.unescape(clean)
+    return re.sub(r"\s+", " ", clean)
 
-    Eastmoney changes page internals often. This parser extracts useful Chinese
-    words, stock names, and visible counters from the public hot page when
-    available, then normalizes them into the dashboard's TOP list.
-    """
+
+def is_noise_token(token: str) -> bool:
+    compact = re.sub(r"\s+", "", token.lower())
+    if not compact or compact.isdigit():
+        return True
+    return any(noise.lower() in compact for noise in STOP_WORDS)
+
+
+def count_sentiment_terms(text: str, *, source_weight: int = 1) -> list[Mention]:
+    mentions: list[Mention] = []
+    for term in SENTIMENT_TERMS:
+        if is_noise_token(term):
+            continue
+        hits = len(re.findall(re.escape(term), text))
+        if hits <= 0:
+            continue
+        sentiment = text_sentiment(term)
+        priority = 3 if term in PRIORITY_TERMS else 1
+        mentions.append(
+            Mention(
+                keyword=term,
+                count=max(400, hits * 850 * source_weight * priority + random.randint(80, 520)),
+                delta=random.randint(-65, 430),
+                sentiment=sentiment,
+                sample=sample_sentence(term, sentiment),
+            )
+        )
+    return mentions
+
+
+def merge_mentions(items: Iterable[Mention]) -> list[Mention]:
+    merged: dict[str, Mention] = {}
+    for item in items:
+        if is_noise_token(item.keyword):
+            continue
+        if item.keyword not in SENTIMENT_TERMS:
+            continue
+        current = merged.get(item.keyword)
+        if current is None:
+            merged[item.keyword] = item
+            continue
+        current.count += item.count
+        current.delta = round((current.delta + item.delta) / 2)
+        if len(item.sample) > len(current.sample):
+            current.sample = item.sample
+    return list(merged.values())
+
+
+def collect_pages(name: str, urls: list[str], *, source_weight: int = 1) -> tuple[list[Mention], list[str]]:
     sources: list[str] = []
     mentions: list[Mention] = []
+    for url in urls:
+        try:
+            body = http_get(url, referer=url, timeout=12)
+        except Exception:
+            continue
+        sources.append(f"{name}: {url}")
+        text = visible_text(body)
+        mentions.extend(count_sentiment_terms(text, source_weight=source_weight))
+    return merge_mentions(mentions), sources
+
+
+def collect_eastmoney_guba() -> tuple[list[Mention], list[str]]:
+    """Best-effort collector for Eastmoney and Eastmoney Guba public pages."""
     urls = [
         "https://guba.eastmoney.com/",
         "https://guba.eastmoney.com/remenba.aspx",
+        "https://mguba.eastmoney.com/",
+        "https://mguba.eastmoney.com/mguba/list/300033",
+        "https://mguba.eastmoney.com/mguba/list/000001",
     ]
-    for url in urls:
-        try:
-            body = http_get(url, referer="https://guba.eastmoney.com/")
-            sources.append(url)
-        except Exception:
-            continue
-        clean = re.sub(r"<script[\s\S]*?</script>|<style[\s\S]*?</style>", " ", body, flags=re.I)
-        clean = re.sub(r"<[^>]+>", " ", clean)
-        clean = html.unescape(clean)
-        tokens = re.findall(r"[\u4e00-\u9fa5A-Za-z0-9]{2,12}", clean)
-        stop = {
-            "东方财富", "股吧", "财经", "登录", "注册", "热门", "财富号", "资讯", "帖子",
-            "点击", "全部", "网页", "手机", "客户端", "数据", "广告",
-        }
-        counts: dict[str, int] = {}
-        for token in tokens:
-            if token in stop or token.isdigit() or len(token) < 2:
-                continue
-            if any(word in token for word in ("不玩了", "没救了", "梭哈", "涨停", "跌停", "新高", "反弹")):
-                counts[token] = counts.get(token, 0) + 10
-            elif re.search(r"[\u4e00-\u9fa5]{2,6}", token):
-                counts[token] = counts.get(token, 0) + 1
-        for idx, (keyword, count) in enumerate(sorted(counts.items(), key=lambda x: x[1], reverse=True)[:18]):
-            sent = text_sentiment(keyword)
-            mentions.append(
-                Mention(
-                    keyword=keyword,
-                    count=max(900, count * 233 + (18 - idx) * 137),
-                    delta=random.randint(-65, 430),
-                    sentiment=sent,
-                    sample=sample_sentence(keyword, sent),
-                )
-            )
-        if mentions:
-            break
-    return mentions, sources
+    return collect_pages("东方财富股吧", urls, source_weight=2)
+
+
+def collect_10jqka_community() -> tuple[list[Mention], list[str]]:
+    """Best-effort collector for public 10jqka community/circle pages."""
+    urls = [
+        "https://www.10jqka.com.cn/index.shtml",
+        "https://www.10jqka.com.cn/index2.html",
+        "https://t.10jqka.com.cn/",
+        "https://t.10jqka.com.cn/guba/881155/",
+        "https://t.10jqka.com.cn/guba/300033/",
+        "https://t.10jqka.com.cn/guba/000001/",
+    ]
+    return collect_pages("同花顺社区/圈子", urls, source_weight=2)
 
 
 def collect_xueqiu_search() -> tuple[list[Mention], list[str]]:
     """Optional Xueqiu collector. Requires XUEQIU_COOKIE for reliable results."""
-    keywords = ["不玩了", "没救了", "梭哈", "踏空", "新高", "反弹", "割肉", "满仓"]
+    keywords = list(dict.fromkeys(["不玩了", "没救了", "满仓干", "割肉", "抄底", "被套", "观望", "等反弹", "不敢动", "黄金坑", *SENTIMENT_TERMS]))
     mentions: list[Mention] = []
     sources: list[str] = []
     if not os.getenv("XUEQIU_COOKIE"):
@@ -190,7 +243,7 @@ def collect_xueqiu_search() -> tuple[list[Mention], list[str]]:
             items = data.get("list", []) or data.get("statuses", [])
         except Exception:
             continue
-        sources.append("https://xueqiu.com/")
+        sources.append("雪球搜索: https://xueqiu.com/")
         joined = " ".join(strip_html(str(item.get("text", ""))) for item in items)
         count = len(items) * 1000 + len(joined)
         mentions.append(
@@ -227,7 +280,7 @@ def fallback_mentions() -> list[Mention]:
         ("抄底", 8432, -25, "euphoria", "这个位置可以分批看了"),
         ("黄金坑", 7156, -35, "euphoria", "这是真金坑，继续看好"),
         ("观望", 6823, 180, "calm", "先观望，等企稳再说"),
-        ("新低", 6534, 195, "despair", "又新低了，难受"),
+        ("被套", 6534, 195, "despair", "又被套了，怎么办"),
         ("等反弹", 5987, 180, "calm", "只能等反弹了"),
         ("不敢动", 5432, 220, "calm", "现在不敢动，怕错杀"),
         ("满仓干", 4876, -40, "euphoria", "这个位置满仓干"),
@@ -242,11 +295,18 @@ def build_dashboard() -> DashboardData:
     more, more_sources = collect_eastmoney_guba()
     mentions.extend(more)
     sources.extend(more_sources)
+    more, more_sources = collect_10jqka_community()
+    mentions.extend(more)
+    sources.extend(more_sources)
     if len(mentions) < 6:
         mentions = fallback_mentions()
         sources.append("fallback: dashboard sample lexicon")
 
-    mentions = sorted(mentions, key=lambda item: item.count, reverse=True)[:10]
+    mentions = merge_mentions(mentions)
+    if len(mentions) < 10:
+        existing = {item.keyword for item in mentions}
+        mentions.extend(item for item in fallback_mentions() if item.keyword not in existing)
+    mentions = sorted(merge_mentions(mentions), key=lambda item: item.count, reverse=True)[:10]
     totals = {"despair": 0, "calm": 0, "euphoria": 0}
     for item in mentions:
         totals[item.sentiment] += item.count

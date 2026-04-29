@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 dashboard_preview.html
+gha_logs_*/
+gha_logs_*.zip
